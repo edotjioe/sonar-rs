@@ -2,6 +2,8 @@
 name = "sonar-rs"
 version = "0.1.23"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/edotjioe/sonar-rs"
 
 [dependencies]
 base64 = "0.23.1"
