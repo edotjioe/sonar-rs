@@ -11,11 +11,11 @@ Stop the Java service first (both own the `sonar_*` sinks and port 8080):
 
     systemctl --user stop sonar && cargo run --release
 
-## Memory (2026-11-11, mixer + base station + 5 level meters + UI polling, `/proc/<pid>/smaps_rollup`)
+## Memory (2026-11-11, full port: base station, 5 level meters, OBS connected, UI + OBS page polling, `/proc/<pid>/smaps_rollup`)
 
 |                     | Pss_Anon | Pss_File | RSS     |
 |---------------------|----------|----------|---------|
 | Java, GraalVM native | 48.7 MB  | 122 MB   | 176 MB  |
-| Rust (this)          | 0.9 MB   | 0.8 MB   | 4.4 MB  |
+| Rust (this)          | 1.2 MB   | 1.0 MB   | 5.0 MB  |
 
 The EQ `pipewire` child processes (~64 MB total RSS) are the same in both and not counted.
