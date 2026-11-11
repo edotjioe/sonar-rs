@@ -7,8 +7,9 @@ Everything the Java version does: channels, EQ, app routing, profiles, the Arcti
 station (ChatMix dial, volume knob, mute, battery), level meters, Bluetooth batteries, mic test, streamer
 mode, spatial audio, OBS remote, the Meta+S overlay (KDE hotkey), tray icon and auto-update.
 
-This repo is standalone. The UI (`static/`, built into the binary), the overlay and tray (`sonar-window.py`)
-and the launchers are copies of sonar-linux's, taken at sonar-linux `fc6c9ce`.
+This is where Sonar is developed now. It's standalone: the UI (`static/`, built into the binary), the overlay
+and tray (`sonar-window.py`) and the launchers live here. They started as copies of sonar-linux's (at
+`fc6c9ce`); the Java version stays as it is at v0.1.23.
 
 ## Requirements
 
