@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonar — OBS</title>
+<link rel="icon" type="image/png" href="/favicon.png" />
+<link rel="stylesheet" href="/sonar.css" />
+</head>
+<body>
+<div class="sweep" aria-hidden="true"></div>
+<main>
+  <h1 id="title">OBS</h1>
+  <div class="sub">Recording and OBS audio sources, over obs-websocket.</div>
+  <img id="preview" class="preview" alt="OBS preview" hidden />
+  <div id="obs"><div class="empty">Connecting…</div></div>
+</main>
+
+<script src="/common.js"></script>
+<script>
+let barLast, inputsLast;
+
+// --- OBS: recording controls + each audio input's device and mute (via obs-websocket) ---
+// The bar and the inputs table re-render separately, and only when their own data changes:
+// the timecode ticks every second while recording, which must not rebuild an open dropdown.
+async function loadObs() {
+  const o = await (await fetch('/api/obs')).json();
+  const host = $('obs');
+  setOnline(!o.reason);
+  if (o.reason) {
+    host.innerHTML = `<div class="empty">${esc(o.reason)}</div>`;
+    barLast = inputsLast = undefined;
+    return;
+  }
+  if (!$('obsBar')) host.innerHTML = '<div id="obsBar"></div><div id="obsInputs"></div>';
+  const r = o.recording;
+  const bar = JSON.stringify(r);
+  if (bar !== barLast) {
+    barLast = bar;
+    const state = !r.active ? '' : r.paused ? '⏸ Paused' : '<span class="rec">●</span> Recording';
+    $('obsBar').innerHTML = `
+    <div class="obsbar">
+      ${r.active ? '' : `<button class="recbtn" onclick="obsRecord('start')"><span class="rec">●</span> Record</button>`}
+      ${r.active && !r.paused ? `<button onclick="obsRecord('pause')">⏸ Pause</button>` : ''}
+      ${r.active && r.paused ? `<button onclick="obsRecord('resume')">▶ Resume</button>` : ''}
+      ${r.active ? `<button class="danger" onclick="obsRecord('stop')">■ Stop</button>` : ''}
+      <span class="tc">${state} ${r.active ? esc(r.timecode.replace(/\.\d+$/, '')) : ''}</span>
+    </div>`;
+  }
+  const inputs = JSON.stringify(o.inputs);
+  if (inputs !== inputsLast) {
+    inputsLast = inputs;
+    $('obsInputs').innerHTML = o.inputs.length ? `<table><thead><tr><th>Audio source</th><th>Device</th><th></th></tr></thead><tbody>${o.inputs.map((i, n) => `
+      <tr><td>${esc(i.name)}</td>
+        <td>${i.devices.length ? `<select onchange="obsInput(${n}, { deviceId: this.value })">${i.devices.map(d =>
+          `<option value="${esc(d.value)}" ${d.value === i.deviceId ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>` : ''}</td>
+        <td><button class="mute" title="Mute in OBS" onclick="obsInput(${n}, { muted: ${!i.muted} })">${i.muted ? '🔇' : '🔊'}</button></td></tr>`).join('')}
+    </tbody></table>` : '<div class="empty">No audio sources in OBS.</div>';
+  }
+  obsInputs = o.inputs;
+}
+let obsInputs = [];
+// the dot before the title: red while OBS can't be reached (or Sonar itself can't)
+function setOnline(online) { $('title').classList.toggle('offline', !online); }
+function obsRecord(action) { api('/api/obs/record', 'POST', { action }).then(loadObs).catch(e => alert(e.message)); }
+function obsInput(n, change) { api('/api/obs/input', 'POST', { name: obsInputs[n].name, ...change }).then(loadObs).catch(e => alert(e.message)); }
+
+// preview: reload the next frame once the previous one has arrived (self-throttling, ~2 fps);
+// while OBS is unavailable, hide it and retry slowly
+const preview = $('preview');
+const nextFrame = (delay) => setTimeout(() => preview.src = '/api/obs/preview?t=' + Date.now(), delay);
+preview.onload = () => { preview.hidden = false; nextFrame(400); };
+preview.onerror = () => { preview.hidden = true; nextFrame(3000); };
+nextFrame(0);
+
+loadObs().catch(() => setOnline(false));
+setInterval(() => loadObs().catch(() => setOnline(false)), 1000);
+</script>
+</body>
+</html>

@@ -7,7 +7,6 @@ Conflicts=sonar.service
 
 [Service]
 WorkingDirectory=@REPO@
-Environment=SONAR_STATIC=@STATIC@
 ExecStart=@REPO@/target/release/sonar-rs
 Restart=on-failure
 RestartSec=3

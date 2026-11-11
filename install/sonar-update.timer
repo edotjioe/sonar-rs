@@ -1,0 +1,9 @@
+[Unit]
+Description=Update Sonar shortly after login, then daily (toggled in Sonar's Preferences)
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=1d
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sonar Overlay
+Comment=Show/hide the Sonar mixer overlay
+Exec=@REPO@/sonar-window.py --toggle
+Icon=sonar
+NoDisplay=true
+X-KDE-Shortcuts=Meta+S
+StartupNotify=false

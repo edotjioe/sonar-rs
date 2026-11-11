@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonar</title>
+<link rel="icon" type="image/png" href="/favicon.png" />
+<link rel="stylesheet" href="/sonar.css" />
+</head>
+<body>
+<div class="sweep" aria-hidden="true"></div>
+<main>
+  <h1>Sonar <small id="version" class="version"></small><small id="headset" class="version" hidden title="Headset batteries: Arctis (and the spare in its base station), Bluetooth headphones"></small><span><button title="OBS recording" onclick="openObs()">OBS</button> <button title="Preferences" onclick="loadHotkey().catch(() => {}); loadAutoUpdate().catch(() => {}); $('prefs').showModal()">⚙</button></span></h1>
+  <div class="sub">PipeWire mixer — assign apps to channels, set volume, choose output.</div>
+
+  <div class="chatmix" id="master" title="Every channel's volume (not the stream mix); the base station's knob turns it too">
+    <b>Master</b>
+    <input type="range" id="masterSlider" min="0" max="100" step="1" value="100" oninput="masterChanged()" />
+    <span class="side" id="masterVal">100%</span>
+  </div>
+  <div class="chatmix" id="chatmix" hidden title="Double-click to centre">
+    <b>ChatMix</b>
+    <span class="side" id="cmGame"></span>
+    <input type="range" id="cmSlider" min="-100" max="100" step="1" value="0" oninput="chatMixChanged()" ondblclick="this.value = 0; chatMixChanged()" />
+    <span class="side" id="cmChat"></span>
+  </div>
+  <div class="grid" id="channels"></div>
+  <div class="addbar">
+    <input type="text" id="newName" placeholder="New channel name" />
+    <button onclick="addChannel()">Add channel</button>
+  </div>
+
+  <div class="section">
+    <h2>Applications</h2>
+    <div id="apps"></div>
+  </div>
+</main>
+<!-- overlay only: OBS as a second panel beside the mixer (a real window would take focus from the game) -->
+<aside id="obsSide" hidden><iframe id="obsFrame" title="OBS"></iframe></aside>
+
+<dialog id="prefs">
+  <h2>Preferences</h2>
+  <fieldset>
+    <legend>Hotkey opens</legend>
+    <label><input type="radio" name="hotkeyOpens" value="overlay" /> Overlay (on top of games)</label>
+    <label><input type="radio" name="hotkeyOpens" value="window" /> Window</label>
+    <label class="hotkey">Key <input type="text" id="hotkey" readonly placeholder="…" title="Click, then press the new key combination"
+      onkeydown="captureHotkey(event)" /></label>
+    <div class="hint" id="hotkeyHint">Click the field, then press the new combination (e.g. Ctrl+Alt+S).</div>
+  </fieldset>
+  <fieldset>
+    <legend>Applications</legend>
+    <label><input type="checkbox" name="autoRoute" /> Auto-assign apps to channels</label>
+    <div class="hint">Off: unassigned apps stay on the default output.</div>
+  </fieldset>
+  <fieldset>
+    <legend>Streaming</legend>
+    <label><input type="checkbox" name="streamerMode" /> Streamer mode</label>
+    <div class="hint">Adds a "Sonar Stream" output with its own volume per channel (📡), without EQ, ChatMix or your mutes.
+      In OBS, capture it with an Audio Output Capture. Switching restarts the channels' audio for a moment.</div>
+  </fieldset>
+  <fieldset>
+    <legend>Updates</legend>
+    <label><input type="checkbox" name="autoUpdate" /> Auto-update</label>
+    <div class="hint">Pulls and rebuilds Sonar when switched on, 2 minutes after login and then daily (install/update.sh). An update restarts
+      the audio for a moment.</div>
+  </fieldset>
+  <fieldset>
+    <legend>Display</legend>
+    <label><input type="checkbox" name="meters" /> Level meters</label>
+    <div class="hint">Meters keep the mic in use while Sonar is open.</div>
+  </fieldset>
+</dialog>
+
+
+<dialog id="eq" class="eq">
+  <h2 id="eqTitle">EQ</h2>
+  <div class="eqrow">
+    <select id="eqProfile" onchange="pickProfile(this.value)"></select>
+    <button onclick="saveProfile()">Save as…</button>
+    <button class="danger" id="eqDelete" onclick="deleteProfile()">Delete</button>
+    <button onclick="$('eqImportText').value = ''; $('eqImport').showModal()" title="Paste or load filters from AutoEq, Squiglink or REW (Equalizer APO format)">Import…</button>
+    <button id="eqViewBtn" onclick="setEqView(eqView === 'curve' ? 'sliders' : 'curve')"></button>
+    <label title="Gain before the EQ: negative leaves headroom for boosts">Preamp <input type="number" id="eqPreamp" min="-24" max="12" step="0.1" onchange="preampChanged()"> dB</label>
+  </div>
+  <div class="bands" id="eqSliders"></div>
+  <svg id="eqGraph" class="eqgraph" viewBox="0 0 600 250"></svg>
+  <div class="eqband" id="eqBand" onchange="editBand()">
+    <span id="eqBandName"></span>
+    <select id="eqType">
+      <option value="peaking">Peak</option><option value="lowshelf">Low shelf</option><option value="highshelf">High shelf</option>
+      <option value="lowpass">Low pass</option><option value="highpass">High pass</option>
+      <option value="bandpass">Band pass</option><option value="notch">Notch</option>
+    </select>
+    <label>Freq <input type="number" id="eqFreq" min="20" max="20000" step="1"> Hz</label>
+    <label>Gain <input type="number" id="eqGain" step="0.5"> dB</label>
+    <label>Q <input type="number" id="eqQ" min="0.1" max="10" step="0.1"></label>
+    <button onclick="removeBand()">Remove</button>
+  </div>
+  <div class="eqtone" oninput="toneChanged()">
+    <label>Bass <input type="range" min="-12" max="12" step="0.5"> <span></span></label>
+    <label>Voice <input type="range" min="-12" max="12" step="0.5"> <span></span></label>
+    <label>Treble <input type="range" min="-12" max="12" step="0.5"> <span></span></label>
+  </div>
+  <div class="eqmic" id="eqMic" hidden>
+    <button id="eqMicRec" onclick="micTest()">● Record 5 s</button>
+    <button id="eqMicPlay" onclick="micAudio?.play()" disabled>▶ Play</button>
+    <span class="hint">Hear yourself as others do: record, listen, tune, record again.</span>
+  </div>
+</dialog>
+
+<dialog id="eqImport" class="eq">
+  <h2>Import EQ</h2>
+  <div class="hint">Equalizer APO parametric filters, e.g. AutoEq's "ParametricEQ.txt". Replaces the points and the preamp.</div>
+  <textarea id="eqImportText" rows="12" placeholder="Preamp: -6.2 dB
+Filter 1: ON LSC Fc 105 Hz Gain 5.3 dB Q 0.70
+Filter 2: ON PK Fc 2150 Hz Gain -3.1 dB Q 1.80"></textarea>
+  <input type="file" accept=".txt,text/plain" onchange="this.files[0]?.text().then(t => $('eqImportText').value = t)" />
+  <footer><button onclick="importEq()">Import</button></footer>
+</dialog>
+
+<script src="/common.js"></script>
+<script>
+if (new URLSearchParams(location.search).has('overlay')) {
+  document.documentElement.classList.add('overlay');
+  // clicking the dimmed backdrop closes the overlay (sonar-window.py listens for this message)
+  document.body.addEventListener('click', (e) => {
+    if (e.target === document.body) window.webkit?.messageHandlers?.sonar?.postMessage('close');
+  });
+  // The overlay doesn't take the keyboard (a fullscreen game would minimize), except while typing:
+  // a click into a text field (or the EQ graph: arrow keys) asks for it, a click anywhere else hands it back.
+  // Same around prompt().
+  const post = (m) => window.webkit?.messageHandlers?.sonar?.postMessage(m);
+  const isText = (el) => el.closest?.('input[type=text], input[type=number], input:not([type]), textarea, .eqgraph, .bands, .eqtone');
+  document.addEventListener('pointerdown', (e) => post(isText(e.target) ? 'keyboard' : 'nokeyboard'), true);
+  const nativePrompt = window.prompt.bind(window);
+  window.prompt = (...args) => {
+    post('keyboard');
+    try { return nativePrompt(...args); } finally { post('nokeyboard'); }
+  };
+  new ResizeObserver(fitSweep).observe(document.querySelector('main'));
+  window.addEventListener('resize', fitSweep);
+}
+// Overlay: the sweep covers just the mixer panel, not the whole screen.
+function fitSweep() {
+  const r = document.querySelector('main').getBoundingClientRect();
+  Object.assign(document.querySelector('.sweep').style,
+    { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+}
+
+let devices = [];
+let prefs = { meters: true };
+let sources = [];
+let channelsCache = [];
+let eqInfo = { maxGain: 12, profiles: [] };
+let eqChannel = null; // channel id the EQ dialog is editing
+let eqTimer;
+let cmTimer;
+let cmTouched = 0; // last local change: ignore the server's value briefly so it doesn't fight the drag
+
+async function loadDevices() {
+  devices = await (await fetch('/api/devices')).json();
+  sources = await (await fetch('/api/sources')).json();
+}
+
+async function loadChannels() {
+  channelsCache = await (await fetch('/api/channels')).json();
+  renderChannels();
+}
+
+let appsLast;
+async function loadApps() {
+  const text = await (await fetch('/api/apps')).text();
+  // rebuild only on change (the dropdowns list the channels too), or an open dropdown closes under the user
+  const key = text + JSON.stringify(channelsCache);
+  if (key === appsLast) return;
+  appsLast = key;
+  const apps = JSON.parse(text);
+  const host = $('apps');
+  if (!apps.length) { host.innerHTML = '<div class="empty">No applications playing.</div>'; return; }
+  host.innerHTML = '<table><thead><tr><th>App</th><th>Binary</th><th>Now playing into</th><th>Channel</th></tr></thead><tbody></tbody></table>';
+  const tbody = host.querySelector('tbody');
+  for (const a of apps) {
+    const tr = document.createElement('tr');
+    const sel = document.createElement('select');
+    sel.innerHTML = `<option value="">Auto${a.autoChannel ? ' (' + esc(a.autoChannel) + ')' : ''}</option>` + channelsCache.filter(c => !c.mic)
+      .map(c => `<option value="${c.id}" ${a.channelId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    sel.onchange = () => route(a, sel.value || null);
+    tr.innerHTML = `<td>${esc(a.appName)}</td><td class="chip">${esc(a.binary)}</td><td>${esc(a.sinkName)}</td>`;
+    tr.lastElementChild.appendChild(sel);
+    tbody.appendChild(tr);
+  }
+}
+
+// --- ChatMix: -100 all Game .. +100 all Chat; the label shows each side's share ---
+function renderChatMix() {
+  const v = +$('cmSlider').value;
+  $('cmGame').textContent = 'Game ' + (v > 0 ? 100 - v : 100) + '%';
+  $('cmChat').textContent = (v < 0 ? 100 + v : 100) + '% Chat';
+}
+function chatMixChanged() {
+  cmTouched = Date.now();
+  renderChatMix();
+  clearTimeout(cmTimer);
+  cmTimer = setTimeout(() => api('/api/chatmix', 'POST', { mix: +$('cmSlider').value }).catch(alert), 60);
+}
+
+// --- Master volume: 0..100 over every output channel; the base station's knob sets it too ---
+let masterTimer;
+function masterChanged() {
+  cmTouched = Date.now();
+  $('masterVal').textContent = $('masterSlider').value + '%';
+  clearTimeout(masterTimer);
+  masterTimer = setTimeout(() => api('/api/master', 'POST', { volume: +$('masterSlider').value }).catch(alert), 60);
+}
+
+// follow the hardware dial and knob on the base station (they change chatMix/masterVolume server-side)
+async function syncChatMix() {
+  const { chatMix, masterVolume } = await (await fetch('/api/preferences')).json();
+  if (Date.now() - cmTouched > 1500 && +$('cmSlider').value !== chatMix) {
+    $('cmSlider').value = chatMix;
+    renderChatMix();
+  }
+  if (Date.now() - cmTouched > 1500 && +$('masterSlider').value !== masterVolume) {
+    $('masterSlider').value = masterVolume;
+    $('masterVal').textContent = masterVolume + '%';
+  }
+}
+
+// Window: sonar-window.py opens it as its own window (a browser: a popup; same name = reused).
+// Overlay: toggles a panel beside the mixer, so the game keeps focus; remembered for next time.
+function openObs() {
+  if (!document.documentElement.classList.contains('overlay')) {
+    window.open('/obs.html', 'sonar-obs', 'width=620,height=560');
+    return;
+  }
+  showObsSide($('obsSide').hidden);
+}
+function showObsSide(show) {
+  $('obsSide').hidden = !show;
+  fitSweep(); // the mixer panel shifts sideways to make room
+  $('obsFrame').src = show ? '/obs.html' : 'about:blank'; // unloaded when hidden: stops polling OBS
+  try { localStorage.setItem('obsSide', show ? '1' : ''); } catch (e) {}
+}
+
+const CHANNEL_ACCENTS = { sonar_game: '--game', sonar_chat: '--chat', sonar_media: '--media', sonar_aux: '--aux', sonar_mic: '--mic' };
+function channelAccentVar(sinkName) { return `var(${CHANNEL_ACCENTS[sinkName] || '--accent'})`; }
+
+function renderChannels() {
+  // only meaningful while both default channels exist (looked up by sink name, like the server)
+  $('chatmix').hidden = !['sonar_game', 'sonar_chat'].every(n => channelsCache.some(c => c.sinkName === n));
+  $('channels').innerHTML = channelsCache.map((c, i) => `
+    <div class="card" style="--ch:${channelAccentVar(c.sinkName)}">
+      <header>
+        <h2 class="${c.muted ? 'muted' : ''}">${esc(c.name)}</h2>
+        <div>
+          <button title="Move left" onclick="move(${i}, -1)" ${i === 0 ? 'disabled' : ''}>◀</button>
+          <button title="Move right" onclick="move(${i}, 1)" ${i === channelsCache.length - 1 ? 'disabled' : ''}>▶</button>
+          <button title="Rename" onclick="renameChannel(${c.id})">✎</button>
+          <button class="mute" title="Mute" onclick="toggleMute(${c.id}, ${!c.muted})">${c.muted ? '🔇' : '🔊'}</button>
+          ${c.deletable ? `<button class="danger" title="Delete" onclick="delChannel(${c.id})">✕</button>` : ''}
+        </div>
+      </header>
+      <div class="row">
+        ${streaming(c) ? '<span class="mix" title="What you hear">🎧</span>' : ''}
+        <input type="range" min="0" max="${c.mic ? 200 : 100}" value="${c.volume}" oninput="this.nextElementSibling.textContent=this.value" onchange="setVolume(${c.id}, this.value)" />
+        <span class="val">${c.volume}</span>
+      </div>
+      ${streaming(c) ? `<div class="row">
+        <span class="mix" title="Stream mix (Sonar Stream, for OBS)">📡</span>
+        <input type="range" min="0" max="100" value="${c.streamVolume}" oninput="this.nextElementSibling.textContent=this.value" onchange="setStreamVolume(${c.id}, this.value)" />
+        <span class="val">${c.streamVolume}</span>
+        <button class="mute" title="Mute on stream" onclick="setStreamMute(${c.id}, ${!c.streamMuted})">${c.streamMuted ? '🔇' : '🔊'}</button>
+      </div>` : ''}
+      <div class="meter"><div id="lvl-${c.id}"></div></div>
+      <div class="devlabel">${c.mic ? 'Input' : 'Output'}</div>
+      <select onchange="setDevice(${c.id}, this.value)">
+        ${(c.mic ? sources : devices).map(d => `<option value="${esc(d.name)}" ${c.deviceName === d.name ? 'selected' : ''}>${esc(d.description)}</option>`).join('')}
+      </select>
+      <button class="eqbtn" onclick="openEq(${c.id})" title="${c.mic ? '' : 'EQ for ' + esc(eqOutputName(c)) + ': each output keeps its own'}">EQ: ${esc(profileName(c))}</button>
+      ${c.mic ? `<label class="nsbtn" title="Remove background noise (keyboard, fans) with rnnoise"><input type="checkbox" ${c.noiseSuppression ? 'checked' : ''} onchange="setNoise(${c.id}, this.checked)" /> Noise suppression</label>`
+        : `<label class="nsbtn" title="Virtual 7.1 surround for headphones. Restart a game after switching: games pick stereo or surround when they start"><input type="checkbox" ${c.spatial ? 'checked' : ''} onchange="setSpatial(${c.id}, this.checked)" /> Spatial audio</label>`}
+      <div class="devlabel status">${c.active ? '<span class="live-dot">●</span> live' : '○ offline'} — ${esc(c.sinkName)}</div>
+    </div>`).join('');
+}
+
+async function loadPrefs() {
+  prefs = await (await fetch('/api/preferences')).json();
+  const d = $('prefs');
+  d.querySelector(`[name=hotkeyOpens][value=${prefs.hotkeyOpens}]`).checked = true;
+  d.querySelector('[name=autoRoute]').checked = prefs.autoRoute;
+  d.querySelector('[name=meters]').checked = prefs.meters;
+  d.querySelector('[name=streamerMode]').checked = prefs.streamerMode;
+  document.documentElement.classList.toggle('no-meters', !prefs.meters);
+  $('cmSlider').value = prefs.chatMix;
+  renderChatMix();
+  $('masterSlider').value = prefs.masterVolume;
+  $('masterVal').textContent = prefs.masterVolume + '%';
+}
+
+// The overlay hotkey lives in KDE's global shortcuts; Sonar changes it there (null key = not KDE)
+async function loadHotkey() {
+  const { key } = await (await fetch('/api/hotkey')).json();
+  $('hotkey').value = key || '';
+  $('hotkey').disabled = key == null;
+  if (key == null) $('hotkeyHint').textContent = 'Set the hotkey in your desktop\'s shortcut settings (only KDE can be changed from here).';
+}
+const KEY_MODS = [['metaKey', 'Meta'], ['ctrlKey', 'Ctrl'], ['altKey', 'Alt'], ['shiftKey', 'Shift']];
+async function captureHotkey(e) {
+  if (e.key === 'Tab') return;
+  e.preventDefault();
+  // e.code, not e.key: layout- and Shift-independent (KeyS, Digit1, F5)
+  const key = e.code.match(/^Key([A-Z])$|^Digit(\d)$|^(F\d{1,2})$/);
+  if (!key) return; // a lone modifier: wait for the key
+  const combo = [...KEY_MODS.filter(([p]) => e[p]).map(([, n]) => n), key[1] || key[2] || key[3]].join('+');
+  const hint = $('hotkeyHint');
+  try {
+    await api('/api/hotkey', 'PUT', { key: combo });
+    hint.textContent = `Hotkey set to ${combo}.`;
+  } catch (err) {
+    hint.textContent = err.message;
+  }
+  loadHotkey();
+}
+
+// Auto-update is the sonar-update.timer user unit, not a stored preference
+async function loadAutoUpdate() {
+  $('prefs').querySelector('[name=autoUpdate]').checked = (await (await fetch('/api/auto-update')).json()).enabled;
+}
+async function setAutoUpdate(enabled) {
+  try {
+    await api('/api/auto-update', 'PUT', { enabled });
+  } finally {
+    await loadAutoUpdate();
+  }
+}
+
+async function savePrefs() {
+  const d = $('prefs');
+  await api('/api/preferences', 'PUT', {
+    hotkeyOpens: d.querySelector('[name=hotkeyOpens]:checked').value,
+    autoRoute: d.querySelector('[name=autoRoute]').checked,
+    meters: d.querySelector('[name=meters]').checked,
+  });
+  await loadPrefs();
+  loadApps();
+}
+
+async function loadLevels() {
+  const levels = await (await fetch('/api/levels')).json();
+  for (const [id, v] of Object.entries(levels)) {
+    const bar = $('lvl-' + id);
+    if (bar) bar.style.width = v + '%';
+  }
+}
+
+function route(app, channelId) {
+  api('/api/route', 'POST', { binary: app.binary, displayName: app.appName, channelId }).then(loadApps).catch(alert);
+}
+function setVolume(id, v) { api(`/api/channels/${id}/volume`, 'POST', { volume: +v }).catch(alert); }
+// Streamer mode: output channels get a second slider, their volume in the Sonar Stream mix
+const streaming = c => prefs.streamerMode && !c.mic;
+function setStreamVolume(id, v) { api(`/api/channels/${id}/stream-volume`, 'POST', { volume: +v }).catch(alert); }
+function setStreamMute(id, muted) { api(`/api/channels/${id}/stream-mute`, 'POST', { muted }).then(loadChannels).catch(alert); }
+async function setStreamer(enabled) {
+  await api('/api/streamer', 'POST', { enabled });
+  await loadPrefs();
+  loadChannels();
+}
+// Headset batteries: the Arctis (from its base station) and Bluetooth headphones (via UPower);
+// hidden when there are none
+async function loadHeadset() {
+  const [h, bt] = await Promise.all([fetch('/api/headset').then(r => r.json()), fetch('/api/batteries').then(r => r.json())]);
+  const parts = [];
+  if (h.battery != null || h.spareBattery != null) {
+    parts.push(`🎧 ${h.connected ? (h.charging ? '⚡' : '') + h.battery + '%' : 'off'}`
+      + (h.spareBattery == null ? '' : ` · spare ${h.spareBattery}%`));
+  }
+  bt.forEach(b => parts.push(`🎧 ${b.name} ${b.percent}%`));
+  // with the headset on, the base applies its knob itself (MixerService.masterInHardware): the slider only follows it
+  $('masterSlider').disabled = h.connected;
+  $('headset').hidden = !parts.length;
+  $('headset').textContent = parts.join('  ');
+}
+
+function setNoise(id, enabled) { api(`/api/channels/${id}/noise`, 'POST', { enabled }).then(loadChannels).catch(e => { alert(e.message); loadChannels(); }); }
+function setSpatial(id, enabled) { api(`/api/channels/${id}/spatial`, 'POST', { enabled }).then(loadChannels).catch(e => { alert(e.message); loadChannels(); }); }
+function toggleMute(id, muted) { api(`/api/channels/${id}/mute`, 'POST', { muted }).then(loadChannels).catch(alert); }
+function setDevice(id, deviceName) { api(`/api/channels/${id}/device`, 'POST', { deviceName }).then(loadChannels).catch(alert); }
+function renameChannel(id) {
+  const c = channelsCache.find(c => c.id === id);
+  const name = prompt('Rename channel', c.name)?.trim();
+  if (name && name !== c.name) api(`/api/channels/${id}/name`, 'POST', { name }).then(loadChannels).catch(alert);
+}
+function move(i, dir) {
+  const ids = channelsCache.map(c => c.id);
+  [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+  api('/api/channels/order', 'POST', ids).then(loadChannels).catch(alert);
+}
+function delChannel(id) { api(`/api/channels/${id}`, 'DELETE').then(loadChannels).catch(alert); }
+function addChannel() {
+  const name = $('newName').value.trim();
+  if (!name) return;
+  api('/api/channels', 'POST', { name }).then(() => { $('newName').value = ''; loadChannels(); }).catch(alert);
+}
+// --- EQ: 10 parametric bands, drawn and edited like GG Sonar ---
+async function loadEq() { eqInfo = await (await fetch('/api/eq')).json(); }
+const sameBand = (a, b) => a.type === b.type && Math.abs(a.freq / b.freq - 1) < 0.005
+  && Math.abs(a.gain - b.gain) < 0.05 && Math.abs(a.q - b.q) < 0.005;
+const sameEq = (a, b) => a.length === b.length && a.every((band, i) => sameBand(band, b[i]));
+const sameTone = (a, b) => a.every((g, i) => Math.abs(g - b[i]) < 0.05);
+// the mic and the outputs each have their own profile list (EqProfile.kind); Flat and a few presets are in both
+const profilesFor = mic => eqInfo.profiles.filter(p => p.kind === 'both' || (p.kind === 'mic') === mic);
+const eqIsMic = () => channelsCache.find(c => c.id === eqChannel)?.mic ?? false;
+function matchProfile(bands, tone, preamp, mic) {
+  return profilesFor(mic).find(p => sameEq(p.bands, bands) && sameTone(p.tone, tone) && Math.abs(p.preamp - preamp) < 0.05);
+}
+// each output channel keeps an EQ per output (MixerService.outputKey); the Arctis base counts twice: headset and speakers
+function eqOutputName(c) {
+  const key = c.eqOutput || c.deviceName || '';
+  return key.endsWith('#speakers') ? 'Speakers (base station)' : key.includes('Arctis_Nova_Pro') ? 'Headset' : c.deviceDescription;
+}
+function profileName(c) { return matchProfile(c.eq, c.tone, c.preamp, c.mic)?.name ?? 'Custom'; }
+function fmtHz(f) { return f >= 1000 ? +(f / 1000).toFixed(f < 10000 ? 2 : 1) + 'k' : Math.round(f); }
+
+// Graph: log frequency (20 Hz–20 kHz) × dB. The curve is the real response of the filter-chain:
+// the RBJ cookbook biquad of each band (PipeWire's bq_* builtins), summed in dB.
+const EQ_FS = 48000, EQ_L = 46, EQ_R = 592, EQ_T = 30, EQ_B = 222;
+const EQ_REGIONS = [['Sub bass', 20, 60], ['Bass', 60, 250], ['Low mids', 250, 500], ['Mid range', 500, 2000],
+  ['Upper mids', 2000, 4000], ['Highs', 4000, 20000]];
+const hasGain = band => !/pass|notch/.test(band.type);
+// one colour per point (by band index, so a point keeps its colour while dragged), as in GG
+const EQ_COLORS = ['#8b5cf6', '#5b6cff', '#ff4f8b', '#ff5a5a', '#ff7a59', '#ffa63d', '#c6f432', '#22d3a6', '#3ee0e0', '#38bdf8'];
+let eqCur = [];   // bands being edited
+let eqSel = 0;    // selected band (shown in the editor row; hidden when there are no bands)
+const EQ_MAX_BANDS = 10; // EqBand.MAX_BANDS
+// Bass/Voice/Treble: fixed filters after the bands (EqBand.tone), drawn into the curve, sent separately
+const EQ_TONE = [{ type: 'lowshelf', freq: 100, q: 0.71 }, { type: 'peaking', freq: 2000, q: 0.7 },
+  { type: 'highshelf', freq: 6000, q: 0.71 }];
+let eqTone = [0, 0, 0], eqToneTimer;
+let eqPreamp = 0;
+function preampChanged() {
+  eqPreamp = Math.max(-24, Math.min(12, +$('eqPreamp').value || 0));
+  sendPreamp();
+}
+function sendPreamp() {
+  $('eqPreamp').value = eqPreamp;
+  renderEqHeader();
+  const preamp = eqPreamp;
+  api(`/api/channels/${eqChannel}/preamp`, 'POST', { preamp }).catch(alert);
+  channelsCache.find(c => c.id === eqChannel).preamp = preamp;
+  renderChannels();
+}
+// Equalizer APO's parametric format (AutoEq, Squiglink, REW): "Preamp: -6.2 dB", "Filter 1: ON PK Fc 105 Hz Gain 5.3 dB Q 0.70"
+const APO_TYPES = { PK: 'peaking', PEQ: 'peaking', LS: 'lowshelf', LSC: 'lowshelf', HS: 'highshelf', HSC: 'highshelf',
+  LP: 'lowpass', LPQ: 'lowpass', HP: 'highpass', HPQ: 'highpass', BP: 'bandpass', NO: 'notch' };
+function parseApo(text) {
+  let preamp = 0, skipped = 0;
+  const bands = [];
+  for (const line of text.split(/\r?\n/)) {
+    const pre = line.match(/^\s*Preamp:\s*([-+]?[\d.]+)\s*dB/i);
+    if (pre) preamp += +pre[1];
+    const f = line.match(/^\s*Filter\s*\d*:\s*ON\s+([A-Z]+)\s+Fc\s+([\d.]+)\s*Hz(?:\s+Gain\s+([-+]?[\d.]+)\s*dB)?(?:\s+Q\s+([\d.]+))?/i);
+    if (!f) continue;
+    const type = APO_TYPES[f[1].toUpperCase()];
+    if (!type) { skipped++; continue; }
+    bands.push({ type, freq: +f[2], gain: hasGain({ type }) ? +(f[3] ?? 0) : 0, q: +(f[4] ?? 0.71) });
+  }
+  return { bands, preamp, skipped };
+}
+// Mic test: the server records the virtual mic (after noise suppression and EQ) and sends back a WAV
+let micAudio;
+async function micTest() {
+  const rec = $('eqMicRec');
+  rec.disabled = true;
+  rec.textContent = '● Recording… speak now';
+  try {
+    const r = await fetch('/api/mic/test', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).message || r.statusText);
+    if (micAudio) URL.revokeObjectURL(micAudio.src);
+    micAudio = new Audio(URL.createObjectURL(await r.blob()));
+    $('eqMicPlay').disabled = false;
+    micAudio.play();
+  } catch (e) { alert(e.message); }
+  rec.disabled = false;
+  rec.textContent = '● Record 5 s';
+}
+function importEq() {
+  const { bands, preamp, skipped } = parseApo($('eqImportText').value);
+  if (!bands.length) return alert('No filters found: expected lines like "Filter 1: ON PK Fc 105 Hz Gain 5.3 dB Q 0.70".');
+  const notes = [];
+  if (skipped) notes.push(`${skipped} filter(s) of an unsupported type were skipped.`);
+  if (bands.length > EQ_MAX_BANDS) notes.push(`Only the first ${EQ_MAX_BANDS} of ${bands.length} filters were kept.`);
+  if (bands.some(b => Math.abs(b.gain) > eqInfo.maxGain)) notes.push(`Gains were limited to ±${eqInfo.maxGain} dB.`);
+  eqCur = bands.slice(0, EQ_MAX_BANDS).map(b => ({ ...b, gain: Math.max(-eqInfo.maxGain, Math.min(eqInfo.maxGain, b.gain)),
+    freq: Math.max(20, Math.min(20000, b.freq)), q: Math.max(0.1, Math.min(10, b.q)) }));
+  eqPreamp = Math.max(-24, Math.min(12, preamp));
+  eqSel = 0;
+  $('eqImport').close();
+  bandChanged();
+  sendPreamp();
+  if (notes.length) alert(notes.join('\n'));
+}
+function toneChanged() {
+  eqTone = [...document.querySelectorAll('.eqtone input')].map(i => +i.value);
+  sendTone();
+}
+function sendTone() {
+  renderEqHeader();
+  clearTimeout(eqToneTimer);
+  eqToneTimer = setTimeout(() => {
+    const tone = [...eqTone];
+    api(`/api/channels/${eqChannel}/tone`, 'POST', { tone }).catch(alert);
+    channelsCache.find(c => c.id === eqChannel).tone = tone;
+    renderChannels();
+  }, 60);
+}
+let eqView = 'curve'; // or 'sliders' (see drawSliders)
+try { eqView = localStorage.getItem('eqView') || eqView; } catch (e) {}
+function setEqView(view) {
+  eqView = view;
+  try { localStorage.setItem('eqView', view); } catch (e) {}
+  drawEq();
+}
+function addBand() {
+  eqCur.push({ type: 'peaking', freq: 1000, gain: 0, q: 1.41 });
+  eqSel = eqCur.length - 1;
+  bandChanged();
+}
+// Sliders view: the classic 10-band graphic EQ. Each slider shows the curve at its frequency; moving it shifts the
+// peaking point at exactly that frequency (created if missing: a new point restarts the EQ, a short blip) until the
+// curve hits the slider. That point's own response at its centre is its gain, so the shift is exact.
+const EQ_SLIDER_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]; // EqBand GRAPHIC_FREQS
+const sliderBand = f => eqCur.findIndex(b => b.type === 'peaking' && b.freq === f);
+const curveDb = f => eqCur.reduce((sum, b) => sum + bandDb(f, b), 0)
+  + EQ_TONE.reduce((sum, b, k) => sum + bandDb(f, { ...b, gain: eqTone[k] }), 0);
+function slideBand(f, target) {
+  const i = sliderBand(f), delta = target - curveDb(f);
+  if (i >= 0) return setBand(i, { gain: eqCur[i].gain + delta });
+  if (eqCur.length >= EQ_MAX_BANDS) return;
+  eqCur.push({ type: 'peaking', freq: f, gain: 0, q: 1.41 });
+  setBand(eqCur.length - 1, { gain: delta });
+}
+function drawSliders() {
+  const box = $('eqSliders');
+  if (!box.children.length) {
+    box.innerHTML = EQ_REGIONS.map(([name, lo, hi]) => { // the same header as the curve, spanning its sliders
+      const n = EQ_SLIDER_FREQS.filter(f => f >= lo && f < hi).length;
+      return n ? `<div class="region" style="grid-column: span ${n}">${name}</div>` : '';
+    }).join('') + EQ_SLIDER_FREQS.map(f => `<label><span></span>
+      <input type="range" min="${-eqInfo.maxGain}" max="${eqInfo.maxGain}" step="0.1" oninput="slideBand(${f}, +this.value)">
+      <span>${fmtHz(f)}</span></label>`).join('') + '<p class="hint"></p>';
+  }
+  box.querySelectorAll('label').forEach((label, k) => {
+    const i = sliderBand(EQ_SLIDER_FREQS[k]), gain = Math.round(curveDb(EQ_SLIDER_FREQS[k]) * 10) / 10;
+    const input = label.querySelector('input');
+    input.value = gain;
+    input.disabled = i < 0 && eqCur.length >= EQ_MAX_BANDS;
+    label.querySelector('span').textContent = (gain > 0 ? '+' : '') + gain;
+    label.classList.toggle('sel', i >= 0 && i === eqSel);
+  });
+  const other = eqCur.filter(b => !(b.type === 'peaking' && EQ_SLIDER_FREQS.includes(b.freq))).length;
+  box.querySelector('p').textContent = other ? `+${other} more point${other > 1 ? 's' : ''} in the curve view` : '';
+}
+let eqDrag = null;
+const eqX = f => EQ_L + (EQ_R - EQ_L) * Math.log10(f / 20) / 3;
+const eqFreqAt = x => 20 * 10 ** (3 * (x - EQ_L) / (EQ_R - EQ_L));
+const eqY = db => EQ_T + (EQ_B - EQ_T) * (eqInfo.maxGain - db) / (2 * eqInfo.maxGain);
+const eqDbAt = y => eqInfo.maxGain - (y - EQ_T) / (EQ_B - EQ_T) * 2 * eqInfo.maxGain;
+function bandDb(f, { type, freq, gain, q }) {
+  if (hasGain({ type }) && !gain) return 0;
+  const A = 10 ** (gain / 40), w0 = 2 * Math.PI * freq / EQ_FS, cs = Math.cos(w0), al = Math.sin(w0) / (2 * q);
+  const sA = 2 * Math.sqrt(A) * al;
+  const [b, a] = {
+    peaking: [[1 + al * A, -2 * cs, 1 - al * A], [1 + al / A, -2 * cs, 1 - al / A]],
+    lowpass: [[(1 - cs) / 2, 1 - cs, (1 - cs) / 2], [1 + al, -2 * cs, 1 - al]],
+    highpass: [[(1 + cs) / 2, -(1 + cs), (1 + cs) / 2], [1 + al, -2 * cs, 1 - al]],
+    bandpass: [[al, 0, -al], [1 + al, -2 * cs, 1 - al]], // constant 0 dB peak gain
+    notch: [[1, -2 * cs, 1], [1 + al, -2 * cs, 1 - al]],
+    lowshelf: [[A * (A + 1 - (A - 1) * cs + sA), 2 * A * (A - 1 - (A + 1) * cs), A * (A + 1 - (A - 1) * cs - sA)],
+      [A + 1 + (A - 1) * cs + sA, -2 * (A - 1 + (A + 1) * cs), A + 1 + (A - 1) * cs - sA]],
+    highshelf: [[A * (A + 1 + (A - 1) * cs + sA), -2 * A * (A - 1 + (A + 1) * cs), A * (A + 1 + (A - 1) * cs - sA)],
+      [A + 1 - (A - 1) * cs + sA, 2 * (A - 1 - (A + 1) * cs), A + 1 - (A - 1) * cs - sA]],
+  }[type];
+  const w = 2 * Math.PI * f / EQ_FS;
+  const mag = ([c0, c1, c2]) => (c0 + c1 * Math.cos(w) + c2 * Math.cos(2 * w)) ** 2 + (c1 * Math.sin(w) + c2 * Math.sin(2 * w)) ** 2;
+  return 10 * Math.log10(mag(b) / mag(a));
+}
+function openEq(id) {
+  eqChannel = id;
+  const c = channelsCache.find(c => c.id === id);
+  $('eqTitle').textContent = 'EQ — ' + c.name + (c.mic ? '' : ' · ' + eqOutputName(c));
+  $('eq').style.setProperty('--ch', channelAccentVar(c.sinkName));
+  eqCur = c.eq.map(b => ({ ...b }));
+  eqTone = [...c.tone];
+  eqPreamp = c.preamp;
+  $('eqPreamp').value = eqPreamp;
+  $('eqMic').hidden = !c.mic;
+  const m = eqInfo.maxGain;
+  $('eqGraph').innerHTML =
+    EQ_REGIONS.map(([n, a, b]) => `<rect class="region" x="${eqX(a) + 1}" y="2" width="${eqX(b) - eqX(a) - 2}" height="20"/>
+      <text class="region" x="${(eqX(a) + eqX(b)) / 2}" y="16">${n}</text>`).join('') +
+    [10, 100, 1000, 10000].flatMap(d => [3, 4, 6, 7, 8, 9].map(k => k * d)).filter(f => f > 20 && f < 20000).map(f =>
+      `<line class="minor" x1="${eqX(f)}" x2="${eqX(f)}" y1="${EQ_T}" y2="${EQ_B}"/>`).join('') +
+    [-9, -3, 3, 9].map(db => `<line class="minor" x1="${EQ_L}" x2="${EQ_R}" y1="${eqY(db)}" y2="${eqY(db)}"/>`).join('') +
+    [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000].map(f =>
+      `<line x1="${eqX(f)}" x2="${eqX(f)}" y1="${EQ_T}" y2="${EQ_B}"/><text class="hz" x="${eqX(f)}" y="${EQ_B + 18}">${fmtHz(f)}Hz</text>`).join('') +
+    [m, m / 2, 0, -m / 2, -m].map(db =>
+      `<line class="${db ? '' : 'zero'}" x1="${EQ_L}" x2="${EQ_R}" y1="${eqY(db)}" y2="${eqY(db)}"/><text class="db" x="${EQ_L - 6}" y="${eqY(db) + 4}">${db > 0 ? '+' : ''}${db} dB</text>`).join('') +
+    `<path id="eqCurve"/><g id="eqDots"></g><text id="eqTip" class="tip"></text>`;
+  eqSel = 0;
+  bandChanged(false);
+  $('eq').showModal();
+}
+function drawEq() {
+  $('eqGraph').toggleAttribute('hidden', eqView !== 'curve'); // an <svg> has no .hidden property
+  $('eqSliders').hidden = eqView !== 'sliders';
+  $('eqViewBtn').textContent = eqView === 'curve' ? 'Sliders' : 'Curve';
+  const pts = [];
+  for (let x = EQ_L; x <= EQ_R; x += 3) {
+    const db = curveDb(eqFreqAt(x));
+    pts.push(`${x},${Math.max(EQ_T, Math.min(EQ_B, eqY(db))).toFixed(1)}`);
+  }
+  $('eqCurve').setAttribute('d', 'M' + pts.join('L'));
+  document.querySelectorAll('.eqtone label').forEach((label, k) => {
+    label.querySelector('input').value = eqTone[k];
+    label.querySelector('span').textContent = eqTone[k].toFixed(1) + ' dB';
+  });
+  const dots = $('eqDots');
+  if (dots.children.length !== eqCur.length) { // rebuilt only when bands come or go: keeps focus while editing
+    dots.innerHTML = eqCur.map((b, i) => `<circle class="band" data-i="${i}" r="5" tabindex="0" style="fill: ${EQ_COLORS[i % EQ_COLORS.length]}"><title>Band ${i + 1}</title></circle>`).join('');
+  }
+  eqSel = Math.min(eqSel, eqCur.length - 1);
+  $('eqBand').hidden = eqSel < 0;
+  drawSliders();
+  dots.querySelectorAll('circle.band').forEach((dot, i) => {
+    dot.setAttribute('cx', eqX(eqCur[i].freq));
+    dot.setAttribute('cy', eqY(hasGain(eqCur[i]) ? eqCur[i].gain : 0));
+    dot.classList.toggle('sel', i === eqSel);
+  });
+  const b = eqCur[eqSel], tip = $('eqTip');
+  if (!b) {
+    tip.setAttribute('x', (EQ_L + EQ_R) / 2);
+    tip.setAttribute('y', eqY(0) - 14);
+    tip.textContent = 'Double-click to add a point';
+    return;
+  }
+  tip.textContent = eqDrag == null ? '' : `${fmtHz(b.freq)}Hz${hasGain(b) ? `  ${b.gain > 0 ? '+' : ''}${b.gain} dB` : ''}  Q ${b.q}`;
+  tip.setAttribute('x', Math.min(EQ_R - 70, Math.max(EQ_L + 70, eqX(b.freq))));
+  tip.setAttribute('y', hasGain(b) && b.gain > eqInfo.maxGain / 2 ? eqY(b.gain) + 24 : eqY(hasGain(b) ? b.gain : 0) - 14);
+  $('eqBandName').textContent = `Band ${eqSel + 1}`;
+  $('eqType').value = b.type;
+  $('eqFreq').value = Math.round(b.freq);
+  $('eqGain').value = b.gain;
+  $('eqGain').disabled = !hasGain(b);
+  $('eqQ').value = b.q;
+}
+function setBand(i, patch) {
+  const b = { ...eqCur[i], ...patch }, m = eqInfo.maxGain;
+  b.freq = Math.round(Math.max(20, Math.min(20000, b.freq)));
+  b.gain = Math.round(Math.max(-m, Math.min(m, b.gain)) * 10) / 10;
+  b.q = Math.round(Math.max(0.1, Math.min(10, b.q)) * 100) / 100;
+  eqCur[i] = b;
+  eqSel = i;
+  bandChanged();
+}
+function editBand() {
+  setBand(eqSel, { type: $('eqType').value, freq: +$('eqFreq').value, gain: +$('eqGain').value, q: +$('eqQ').value });
+}
+// drag a point (cut filters only move sideways), wheel = width (Q), double-click: on a point = gain back to 0,
+// elsewhere = add a point there. Focused point: arrow keys up/down gain, left/right frequency (a semitone), Delete removes it.
+function svgPoint(e) {
+  const r = $('eqGraph').getBoundingClientRect();
+  return [(e.clientX - r.left) * 600 / r.width, (e.clientY - r.top) * 250 / r.height];
+}
+function bandAt(e) {
+  const [x, y] = svgPoint(e);
+  let best = null, bestD = 24 ** 2;
+  eqCur.forEach((b, i) => {
+    const d = (eqX(b.freq) - x) ** 2 + (eqY(hasGain(b) ? b.gain : 0) - y) ** 2;
+    if (d < bestD) { best = i; bestD = d; }
+  });
+  return best;
+}
+const graph = $('eqGraph');
+graph.addEventListener('pointerdown', e => {
+  eqDrag = bandAt(e);
+  if (eqDrag == null) return;
+  eqSel = eqDrag;
+  graph.setPointerCapture(e.pointerId);
+  drawEq();
+});
+graph.addEventListener('pointermove', e => {
+  if (eqDrag == null) return;
+  const [x, y] = svgPoint(e);
+  setBand(eqDrag, hasGain(eqCur[eqDrag]) ? { freq: eqFreqAt(x), gain: eqDbAt(y) } : { freq: eqFreqAt(x) });
+});
+graph.addEventListener('pointerup', () => {
+  if (eqDrag == null) return;
+  const dot = graph.querySelector(`circle[data-i="${eqDrag}"]`);
+  eqDrag = null;
+  dot.focus();
+  drawEq();
+});
+graph.addEventListener('dblclick', e => {
+  const i = bandAt(e);
+  if (i != null) return setBand(i, { gain: 0 });
+  if (eqCur.length >= EQ_MAX_BANDS) return;
+  const [x, y] = svgPoint(e);
+  addBand();
+  setBand(eqCur.length - 1, { freq: eqFreqAt(x), gain: eqDbAt(y) });
+});
+function removeBand() {
+  eqCur.splice(eqSel, 1);
+  bandChanged();
+}
+graph.addEventListener('wheel', e => {
+  e.preventDefault();
+  const i = bandAt(e) ?? eqSel;
+  if (i < 0) return;
+  setBand(i, { q: eqCur[i].q * (e.deltaY < 0 ? 1.1 : 1 / 1.1) });
+}, { passive: false });
+graph.addEventListener('keydown', e => {
+  const i = e.target.dataset?.i;
+  if (i != null && (e.key === 'Delete' || e.key === 'Backspace')) {
+    eqSel = +i;
+    removeBand();
+    return;
+  }
+  const b = i != null && eqCur[i], semitone = 2 ** (1 / 12);
+  const patch = b && { ArrowUp: { gain: b.gain + 0.5 }, ArrowDown: { gain: b.gain - 0.5 },
+    ArrowRight: { freq: b.freq * semitone }, ArrowLeft: { freq: b.freq / semitone } }[e.key];
+  if (!patch) return;
+  e.preventDefault();
+  setBand(+i, patch);
+});
+graph.addEventListener('focusin', e => {
+  if (e.target.dataset?.i == null) return;
+  eqSel = +e.target.dataset.i;
+  drawEq();
+});
+function renderEqHeader() {
+  const match = matchProfile(eqCur, eqTone, eqPreamp, eqIsMic());
+  $('eqProfile').innerHTML = (match ? '' : '<option value="" selected>Custom</option>') + profilesFor(eqIsMic()).map(p =>
+    `<option value="${p.id}" ${p === match ? 'selected' : ''}>${esc(p.name)}${p.builtIn ? '' : ' ★'}</option>`).join('');
+  $('eqDelete').disabled = !match || match.builtIn;
+  drawEq();
+}
+// send at most every 60 ms while dragging: each send is a live pw-cli set-param
+function bandChanged(send = true) {
+  renderEqHeader();
+  if (!send) return;
+  clearTimeout(eqTimer);
+  eqTimer = setTimeout(() => {
+    const bands = eqCur.map(b => ({ ...b }));
+    api(`/api/channels/${eqChannel}/eq`, 'POST', { bands }).catch(alert);
+    channelsCache.find(c => c.id === eqChannel).eq = bands;
+    renderChannels();
+  }, 60);
+}
+function pickProfile(id) {
+  const p = eqInfo.profiles.find(p => p.id === +id);
+  if (!p) return;
+  eqCur = p.bands.map(b => ({ ...b }));
+  eqTone = [...p.tone];
+  eqPreamp = p.preamp;
+  bandChanged();
+  sendTone();
+  sendPreamp();
+}
+async function saveProfile() {
+  const name = prompt('Profile name', '')?.trim();
+  if (!name) return;
+  try {
+    await api('/api/eq/profiles', 'POST', { name, bands: eqCur, tone: eqTone, preamp: eqPreamp, mic: eqIsMic() });
+    await loadEq();
+    renderEqHeader();
+    renderChannels();
+  } catch (e) { alert(e.message); }
+}
+async function deleteProfile() {
+  const p = matchProfile(eqCur, eqTone, eqPreamp, eqIsMic());
+  if (!p || p.builtIn || !confirm(`Delete profile "${p.name}"?`)) return;
+  try {
+    await api(`/api/eq/profiles/${p.id}`, 'DELETE');
+    await loadEq();
+    renderEqHeader();
+    renderChannels();
+  } catch (e) { alert(e.message); }
+}
+
+// Panels (dialogs) get a ✕ in the corner, and move by dragging their title; each remembers where it was (per dialog id, in this browser).
+// Double-click the title to centre it again. Kept inside the window, which differs between overlay and window.
+function placeDialog(d, x, y) {
+  d.style.margin = '0';
+  d.style.left = Math.max(0, Math.min(innerWidth - d.offsetWidth, x)) + 'px';
+  d.style.top = Math.max(0, Math.min(innerHeight - d.offsetHeight, y)) + 'px';
+}
+const nativeShowModal = HTMLDialogElement.prototype.showModal;
+HTMLDialogElement.prototype.showModal = function () {
+  nativeShowModal.call(this);
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem('panel:' + this.id)); } catch (e) {}
+  if (pos) placeDialog(this, pos.x, pos.y);
+};
+document.querySelectorAll('dialog').forEach(d => {
+  d.insertAdjacentHTML('afterbegin', '<button class="close" title="Close" aria-label="Close" onclick="this.closest(\'dialog\').close()">✕</button>');
+  const title = d.querySelector('h2');
+  title.classList.add('drag');
+  title.addEventListener('pointerdown', e => {
+    const r = d.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+    title.setPointerCapture(e.pointerId);
+    const move = e => placeDialog(d, e.clientX - dx, e.clientY - dy);
+    title.addEventListener('pointermove', move);
+    title.addEventListener('pointerup', () => {
+      title.removeEventListener('pointermove', move);
+      try { localStorage.setItem('panel:' + d.id, JSON.stringify({ x: d.offsetLeft, y: d.offsetTop })); } catch (e) {}
+    }, { once: true });
+  });
+  title.addEventListener('dblclick', () => {
+    d.style.margin = d.style.left = d.style.top = '';
+    try { localStorage.removeItem('panel:' + d.id); } catch (e) {}
+  });
+});
+
+$('prefs').addEventListener('change', e => (e.target.name === 'streamerMode' ? setStreamer(e.target.checked)
+  : e.target.name === 'autoUpdate' ? setAutoUpdate(e.target.checked) : savePrefs()).catch(alert));
+if (document.documentElement.classList.contains('overlay')) {
+  try { if (localStorage.getItem('obsSide')) showObsSide(true); } catch (e) {}
+}
+
+(async () => {
+  fetch('/api/version').then(r => r.json()).then(v => $('version').textContent = 'v' + v.version).catch(() => {});
+  await loadPrefs();
+  await loadDevices();
+  await loadEq();
+  await loadChannels();
+  await loadApps();
+  setInterval(loadApps, 2000);
+  loadHeadset().catch(() => {});
+  setInterval(() => loadHeadset().catch(() => {}), 10000);
+  setInterval(() => syncChatMix().catch(() => {}), 1000);
+  // don't re-render under the user while they drag EQ sliders
+  setInterval(() => $('eq').open || loadChannels(), 5000);
+  setInterval(() => prefs.meters && loadLevels().catch(() => {}), 100);
+})();
+</script>
+</body>
+</html>

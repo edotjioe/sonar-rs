@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Sonar
+Comment=Audio mixer
+Exec=@REPO@/sonar-window.py
+Icon=sonar
+Categories=AudioVideo;Audio;Mixer;

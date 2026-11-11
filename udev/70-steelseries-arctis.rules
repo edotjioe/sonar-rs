@@ -1,0 +1,5 @@
+# Let the logged-in user open the Arctis Nova Pro Wireless base station's HID interfaces,
+# so Sonar can read the hardware ChatMix dial. Install:
+#   sudo cp udev/70-steelseries-arctis.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0|12e5", TAG+="uaccess"

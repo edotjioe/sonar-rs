@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sonar
+Comment=Sonar tray icon
+Exec=@REPO@/sonar-window.py --tray
+Icon=sonar
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

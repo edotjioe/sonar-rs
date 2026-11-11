@@ -12,6 +12,11 @@ mod meter;
 mod obs;
 mod pw;
 
+/// static/ (the mixer UI), embedded by build.rs.
+mod ui {
+    include!(concat!(env!("OUT_DIR"), "/static_files.rs"));
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -845,7 +850,6 @@ fn respond(req: Request, resp: Resp) {
 }
 
 fn main() {
-    let static_dir = PathBuf::from(std::env::var("SONAR_STATIC").unwrap_or_else(|_| "../steelseriesGG/src/main/resources/static".into()));
     let addr = std::env::var("SONAR_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     std::fs::create_dir_all("data").expect("can't create data/");
     let file = PathBuf::from("data/state.json");
@@ -921,8 +925,8 @@ fn main() {
             }
             _ => {
                 let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
-                match (!rel.contains("..")).then(|| std::fs::read(static_dir.join(rel))).and_then(Result::ok) {
-                    Some(data) => Response::from_data(data).with_header(header("Content-Type", content_type(rel))),
+                match ui::FILES.iter().find(|(p, _)| *p == rel) {
+                    Some((_, data)) => Response::from_data(data.to_vec()).with_header(header("Content-Type", content_type(rel))),
                     None => Response::from_string("Not found").with_status_code(404),
                 }
             }

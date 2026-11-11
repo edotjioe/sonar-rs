@@ -1,0 +1,7 @@
+[Unit]
+Description=Update Sonar (pull, rebuild, restart)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@REPO@/install/update.sh
