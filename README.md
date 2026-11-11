@@ -7,9 +7,12 @@ Same HTTP API and PipeWire handling; serves the Java repo's `index.html` (`SONAR
 Everything the Java backend does: channels, EQ, routing, profiles, the Arctis base station, level meters,
 Bluetooth batteries, mic test, streamer mode, spatial audio, OBS remote, overlay hotkey (KDE), auto-update.
 
-Stop the Java service first (both own the `sonar_*` sinks and port 8080):
+Install as the user service `sonar-rs` (starts at login; switches the Java `sonar.service` off):
 
-    systemctl --user stop sonar && cargo run --release
+    install/install.sh
+
+Back to Java: `systemctl --user disable --now sonar-rs && systemctl --user enable --now sonar`.
+The two services conflict (both own the `sonar_*` sinks and port 8080), so starting one stops the other.
 
 ## Memory (2026-11-11, full port: base station, 5 level meters, OBS connected, UI + OBS page polling, `/proc/<pid>/smaps_rollup`)
 

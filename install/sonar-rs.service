@@ -1,0 +1,16 @@
+[Unit]
+Description=Sonar audio mixer backend (Rust)
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+# both own the sonar_* sinks and port 8080: starting one stops the other
+Conflicts=sonar.service
+
+[Service]
+WorkingDirectory=@REPO@
+Environment=SONAR_STATIC=@STATIC@
+ExecStart=@REPO@/target/release/sonar-rs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
