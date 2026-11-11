@@ -668,6 +668,8 @@ fn main() {
     let file = PathBuf::from("data/state.json");
     let state = std::fs::read(&file).ok().map(|b| serde_json::from_slice(&b).expect("data/state.json is corrupt")).unwrap_or_default();
     let mixer = Arc::new(Mutex::new(Mixer { pw: PipeWire::new(), state, file, modules: HashMap::new(), mic_last_used: HashMap::new(), missing_before: false }));
+    // listen first: another Sonar on the port means another one owns the sinks too
+    let server = Server::http(&addr).expect("can't listen");
     mixer.lock().unwrap().bootstrap();
 
     let m = mixer.clone();
@@ -688,7 +690,6 @@ fn main() {
         }
     });
 
-    let server = Server::http(&addr).expect("can't listen");
     eprintln!("Sonar (Rust spike) on http://{addr}");
     // ponytail: one request at a time, like the Java version's single mixer lock; a thread pool if the UI feels slow
     for mut req in server.incoming_requests() {
