@@ -1,13 +1,15 @@
 //! Sonar backend spike in Rust: same HTTP API and PipeWire handling as the Java version's core
 //! (channels, EQ, volume/mute, devices, ChatMix, master volume, routing, profiles, on-demand mic).
-//! Plus the Arctis base station, level meters, Bluetooth batteries, mic test, streamer mode and spatial audio.
-//! Not ported: OBS, hotkey, auto-update.
+//! Plus the Arctis base station, level meters, Bluetooth batteries, mic test, streamer mode, spatial audio,
+//! OBS remote, overlay hotkey and auto-update: everything the Java backend does.
 //!
 //! State lives in data/state.json. Its shapes match the Java API's JSON, so
 //! `{"channels": GET /api/channels, "prefs": GET /api/preferences, "profiles": GET /api/eq .profiles}` imports one.
 
 mod base;
+mod desktop;
 mod meter;
+mod obs;
 mod pw;
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +22,8 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use base::Base;
+use desktop::classify;
+use obs::Obs;
 use meter::Meters;
 use pw::{EqBand, PipeWire};
 
@@ -209,19 +213,6 @@ fn presets() -> Vec<(&'static str, &'static str, Vec<EqBand>)> {
     ]
 }
 
-/// Guess a channel for an unassigned app: Steam games, then media.role. (Java also reads .desktop Categories.)
-fn classify(s: &pw::AppStream) -> Option<&'static str> {
-    if s.pid > 0 && std::fs::read(format!("/proc/{}/environ", s.pid)).is_ok_and(|e| e.split(|&b| b == 0).any(|v| v.starts_with(b"SteamAppId="))) {
-        return Some("Game");
-    }
-    match s.media_role.as_deref()? {
-        "Game" => Some("Game"),
-        "Communication" | "Phone" => Some("Chat"),
-        "Music" | "Movie" | "Video" => Some("Media"),
-        _ => None,
-    }
-}
-
 /// Which output a channel's EQ is for: its device, and for the Arctis base also whether the headset is on
 /// (off, the base plays to the speakers on its line out, on the same PipeWire device). None = not known yet.
 /// ponytail: the base station's device is recognised by name; fine while base.rs only knows the Nova Pro.
@@ -266,6 +257,7 @@ struct Mixer {
     headset_on: Option<bool>,
     /// Streamer mode's sink module (runtime only).
     stream_module: i64,
+    obs: Arc<Obs>,
 }
 
 impl Mixer {
@@ -574,6 +566,9 @@ impl Mixer {
             let _ = self.create_channel(Some("Mic"), true);
         }
         self.save();
+        // our sinks are brand new: an already-running OBS lost its capture of the old ones
+        let obs = self.obs.clone();
+        std::thread::spawn(move || obs.reattach_sonar_inputs());
     }
 
     /// Channels gone on two checks in a row: PipeWire restarted, rebuild them all.
@@ -648,8 +643,6 @@ impl Mixer {
                 let chans: Vec<(i64, String)> = self.state.channels.iter().map(|c| (c.id, meter_source(c))).collect();
                 Ok(json!(self.meters.levels(chans.into_iter())))
             }
-            (Get, ["hotkey"]) => Ok(json!({ "key": null })),
-            (Get, ["auto-update"]) => Ok(json!({ "enabled": false })),
             (Put, ["preferences"]) => {
                 let p = &mut self.state.prefs;
                 if let Some(v) = b["hotkeyOpens"].as_str() { p.hotkey_opens = if v == "window" { "window" } else { "overlay" }.into(); }
@@ -786,8 +779,6 @@ impl Mixer {
                 self.save();
                 ok
             }
-            (Put, ["auto-update"]) | (Put, ["hotkey"]) =>
-                Err((501, "Not in the Rust spike yet".into())),
             _ => Err((404, "Not found".into())),
         }
     }
@@ -843,6 +834,12 @@ fn mic_test(mixer: &Mutex<Mixer>, seconds: u64) -> Resp {
     }
 }
 
+fn body_json(req: &mut Request) -> Value {
+    let mut body = Vec::new();
+    let _ = req.as_reader().read_to_end(&mut body);
+    serde_json::from_slice(&body).unwrap_or(Value::Null)
+}
+
 fn respond(req: Request, resp: Resp) {
     let _ = req.respond(resp.with_header(header("Cache-Control", "no-store")));
 }
@@ -853,8 +850,9 @@ fn main() {
     std::fs::create_dir_all("data").expect("can't create data/");
     let file = PathBuf::from("data/state.json");
     let state = std::fs::read(&file).ok().map(|b| serde_json::from_slice(&b).expect("data/state.json is corrupt")).unwrap_or_default();
+    let obs = Arc::new(Obs::default());
     let mixer = Arc::new(Mutex::new(Mixer { pw: PipeWire::new(), state, file, modules: HashMap::new(), mic_last_used: HashMap::new(),
-        missing_before: false, meters: Meters::new(), headset_on: None, stream_module: -1 }));
+        missing_before: false, meters: Meters::new(), headset_on: None, stream_module: -1, obs: obs.clone() }));
     // listen first: another Sonar on the port means another one owns the sinks too
     let server = Server::http(&addr).expect("can't listen");
     mixer.lock().unwrap().bootstrap();
@@ -892,6 +890,24 @@ fn main() {
             // outside the mixer lock: the base station's reader takes it while the refresh waits for a reply
             (Method::Get, "/api/headset") => json_resp(Ok(json!(base.refresh()))),
             (Method::Get, "/api/batteries") => json_resp(Ok(json!(base::batteries()))),
+            // these don't touch the mixer: no lock, so a slow OBS or busctl doesn't hold up the UI
+            (Method::Get, "/api/hotkey") => json_resp(Ok(json!({ "key": desktop::hotkey() }))),
+            (Method::Put, "/api/hotkey") => {
+                let b = body_json(&mut req);
+                json_resp(desktop::set_hotkey(b["key"].as_str()).map(|_| json!({ "key": desktop::hotkey() })))
+            }
+            (Method::Get, "/api/auto-update") => json_resp(Ok(json!({ "enabled": desktop::auto_update() }))),
+            (Method::Put, "/api/auto-update") => {
+                let b = body_json(&mut req);
+                json_resp(desktop::set_auto_update(b["enabled"] == true).map(|on| json!({ "enabled": on })))
+            }
+            (Method::Get, "/api/obs") => json_resp(obs.status()),
+            (Method::Get, "/api/obs/preview") => match obs.preview() {
+                Ok(jpg) => Response::from_data(jpg).with_header(header("Content-Type", "image/jpeg")),
+                Err(e) => json_resp(Err(e)),
+            },
+            (Method::Post, "/api/obs/record") => { let b = body_json(&mut req); json_resp(obs.record(&b)) }
+            (Method::Post, "/api/obs/input") => { let b = body_json(&mut req); json_resp(obs.input(&b)) }
             (Method::Post, "/api/mic/test") => {
                 let m = mixer.clone();
                 std::thread::spawn(move || { let r = mic_test(&m, 5); respond(req, r); });
