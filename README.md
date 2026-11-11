@@ -4,7 +4,8 @@ A Rust port of [Sonar](https://github.com/edotjioe/sonar-linux)'s backend core, 
 Same HTTP API and PipeWire handling; serves the Java repo's `index.html` (`SONAR_STATIC`, default
 `../steelseriesGG/src/main/resources/static`). State: `data/state.json`.
 
-Not ported: base station HID, OBS, streamer mode, spatial audio, level meters, mic test, hotkey, auto-update.
+Also ported: Arctis base station (ChatMix, volume knob, mute, battery, EQ per output), level meters,
+Bluetooth batteries, mic test, streamer mode, spatial audio. Not ported: OBS, hotkey, auto-update.
 
 Stop the Java service first (both own the `sonar_*` sinks and port 8080):
 

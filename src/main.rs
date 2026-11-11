@@ -1,10 +1,13 @@
 //! Sonar backend spike in Rust: same HTTP API and PipeWire handling as the Java version's core
 //! (channels, EQ, volume/mute, devices, ChatMix, master volume, routing, profiles, on-demand mic).
-//! Not ported: base station HID, OBS, streamer mode, spatial audio, level meters, mic test, hotkey, auto-update.
+//! Plus the Arctis base station, level meters, Bluetooth batteries, mic test, streamer mode and spatial audio.
+//! Not ported: OBS, hotkey, auto-update.
 //!
 //! State lives in data/state.json. Its shapes match the Java API's JSON, so
 //! `{"channels": GET /api/channels, "prefs": GET /api/preferences, "profiles": GET /api/eq .profiles}` imports one.
 
+mod base;
+mod meter;
 mod pw;
 
 use std::collections::{HashMap, HashSet};
@@ -14,8 +17,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
+use base::Base;
+use meter::Meters;
 use pw::{EqBand, PipeWire};
 
 const DEFAULT_CHANNELS: [&str; 4] = ["Game", "Chat", "Media", "Aux"];
@@ -42,13 +47,24 @@ struct Channel {
     mic: bool,
     noise_suppression: bool,
     spatial: bool,
+    /// The EQ this channel had on each output it played to (key: output_key), so it comes back there.
+    eq_by_output: HashMap<String, SavedEq>,
+    /// The output key the current EQ belongs to; None until first known.
+    eq_output: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SavedEq {
+    bands: Vec<EqBand>,
+    tone: [f64; 3],
+    preamp: f64,
 }
 
 impl Default for Channel {
     fn default() -> Self {
         Channel { id: 0, name: String::new(), sink_name: String::new(), device_name: None, volume: 100, muted: false,
             stream_volume: 100, stream_muted: false, position: 0, eq: vec![], tone: [0.0; 3], preamp: 0.0, mic: false,
-            noise_suppression: false, spatial: false }
+            noise_suppression: false, spatial: false, eq_by_output: HashMap::new(), eq_output: None }
     }
 }
 
@@ -206,6 +222,37 @@ fn classify(s: &pw::AppStream) -> Option<&'static str> {
     }
 }
 
+/// Which output a channel's EQ is for: its device, and for the Arctis base also whether the headset is on
+/// (off, the base plays to the speakers on its line out, on the same PipeWire device). None = not known yet.
+/// ponytail: the base station's device is recognised by name; fine while base.rs only knows the Nova Pro.
+fn output_key(c: &Channel, headset_on: Option<bool>) -> Option<String> {
+    let device = c.device_name.as_ref()?;
+    if c.mic || !device.contains("Arctis_Nova_Pro") {
+        return Some(device.clone());
+    }
+    headset_on.map(|on| if on { device.clone() } else { format!("{device}#speakers") })
+}
+
+/// Point the channel's EQ at its current output: store the previous output's, bring back this one's.
+/// True when the EQ changed (the caller restarts it).
+fn follow_output(c: &mut Channel, headset_on: Option<bool>) -> bool {
+    let Some(key) = output_key(c, headset_on) else { return false };
+    if c.eq_output.as_ref() == Some(&key) {
+        return false;
+    }
+    if let Some(old) = c.eq_output.take() {
+        c.eq_by_output.insert(old, SavedEq { bands: c.eq.clone(), tone: c.tone, preamp: c.preamp });
+    }
+    c.eq_output = Some(key.clone());
+    let Some(saved) = c.eq_by_output.get(&key).cloned() else { return false };
+    (c.eq, c.tone, c.preamp) = (saved.bands, saved.tone, saved.preamp);
+    true
+}
+
+fn meter_source(c: &Channel) -> String {
+    if c.mic { c.sink_name.clone() } else { format!("{}.monitor", c.sink_name) }
+}
+
 struct Mixer {
     pw: PipeWire,
     state: State,
@@ -214,6 +261,11 @@ struct Mixer {
     modules: HashMap<String, i64>,
     mic_last_used: HashMap<String, Instant>,
     missing_before: bool,
+    meters: Meters,
+    /// Headset on/off as the base station reports it; None until it does (or without one).
+    headset_on: Option<bool>,
+    /// Streamer mode's sink module (runtime only).
+    stream_module: i64,
 }
 
 impl Mixer {
@@ -243,7 +295,102 @@ impl Mixer {
             return 0.0;
         }
         let p = &self.state.prefs;
-        preamp * cube(p.master_volume) * cube(mixed(c.volume, &c.sink_name, p.chat_mix))
+        // on the Arctis headset the base applies its volume knob itself
+        let in_hardware = output_key(c, self.headset_on).is_some_and(|k| k.contains("Arctis_Nova_Pro") && !k.ends_with("#speakers"));
+        let master = if in_hardware { 1.0 } else { cube(p.master_volume) };
+        preamp * master * cube(mixed(c.volume, &c.sink_name, p.chat_mix))
+    }
+
+    fn stream_gain(c: &Channel) -> f64 {
+        if c.stream_muted { 0.0 } else { cube(c.stream_volume) }
+    }
+
+    fn apply_stream_gain(&self, i: usize) {
+        let c = &self.state.channels[i];
+        self.pw.set_gain(&format!("{}_stream_in", c.sink_name), Self::stream_gain(c));
+    }
+
+    fn set_chat_mix(&mut self, mix: i32) {
+        self.state.prefs.chat_mix = mix.clamp(-100, 100);
+        self.save();
+        for i in 0..self.state.channels.len() {
+            if ["sonar_game", "sonar_chat"].contains(&self.state.channels[i].sink_name.as_str()) { self.apply_gain(i); }
+        }
+    }
+
+    fn set_master_volume(&mut self, volume: i32) {
+        self.state.prefs.master_volume = volume.clamp(0, 100);
+        self.save();
+        for i in 0..self.state.channels.len() {
+            if !self.state.channels[i].mic { self.apply_gain(i); }
+        }
+    }
+
+    /// The base saw the headset turn on or off: its channels switch to the EQ they had there.
+    fn set_headset_connected(&mut self, on: bool) {
+        self.headset_on = Some(on);
+        let mut changed = false;
+        for i in 0..self.state.channels.len() {
+            let c = &mut self.state.channels[i];
+            if c.mic { continue; }
+            let before = c.eq_output.clone();
+            if follow_output(c, Some(on)) { self.start_eq(i) } else { self.apply_gain(i) } // master moves between knob and Sonar
+            changed |= before != self.state.channels[i].eq_output;
+        }
+        if changed { self.save(); }
+    }
+
+    /// The headset's own mute button: mirror it onto the mic channel.
+    fn set_mic_muted(&mut self, muted: bool) {
+        let mut changed = false;
+        for c in self.state.channels.iter_mut().filter(|c| c.mic && c.muted != muted) {
+            c.muted = muted;
+            self.pw.set_mute(&c.sink_name, muted, true);
+            changed = true;
+        }
+        if changed { self.save(); }
+    }
+
+    /// Before the channels: the stream sink, if streamer mode is on.
+    fn load_stream_sink(&mut self) {
+        self.stream_module = -1;
+        if self.state.prefs.streamer_mode {
+            self.stream_module = self.pw.load_null_sink(pw::STREAM_SINK, "Sonar Stream", false);
+            self.pw.set_volume(pw::STREAM_SINK, 100, false); // WirePlumber may restore an old volume
+            self.pw.set_mute(pw::STREAM_SINK, false, false);
+        }
+    }
+
+    /// Streamer mode: the Sonar Stream sink plus a feed into it from every output channel (restarts their EQs).
+    fn set_streamer_mode(&mut self, on: bool) {
+        self.state.prefs.streamer_mode = on;
+        self.save();
+        if on && self.stream_module < 0 {
+            self.load_stream_sink();
+        }
+        for i in 0..self.state.channels.len() {
+            if !self.state.channels[i].mic { self.start_eq(i); }
+        }
+        if !on && self.stream_module >= 0 {
+            self.pw.unload_module(self.stream_module); // after the restarts: no feed plays into it any more
+            self.stream_module = -1;
+        }
+    }
+
+    /// Virtual 7.1: reloads the channel's sink (its apps blip to the default output until routing moves them back).
+    fn set_spatial(&mut self, i: usize, on: bool) -> Res<()> {
+        if on && pw::spatial_hrtf().is_none() {
+            return Err((503, "Spatial audio needs PipeWire's SOFA plugin and an HRTF: install libmysofa (or put a .sofa file at ~/.local/share/sonar/hrtf.sofa)".into()));
+        }
+        self.state.channels[i].spatial = on;
+        let sink = self.state.channels[i].sink_name.clone();
+        self.meters.forget(&meter_source(&self.state.channels[i])); // its parec dies with the old sink
+        self.pw.stop_eq(&sink);
+        if let Some(m) = self.modules.remove(&sink).filter(|&m| m >= 0) {
+            self.pw.unload_module(m);
+        }
+        self.apply_channel(i);
+        Ok(())
     }
 
     fn apply_gain(&self, i: usize) {
@@ -253,7 +400,9 @@ impl Mixer {
 
     fn start_eq(&self, i: usize) {
         let c = &self.state.channels[i];
-        self.pw.start_eq(&c.sink_name, &c.name, c.device_name.as_deref().unwrap_or(""), &chain(c), c.mic, c.noise_suppression, self.gain(c));
+        let stream = (!c.mic && self.state.prefs.streamer_mode).then(|| Self::stream_gain(c));
+        self.pw.start_eq(&c.sink_name, &c.name, c.device_name.as_deref().unwrap_or(""), &chain(c), c.mic, c.noise_suppression,
+            self.gain(c), stream, c.spatial);
     }
 
     /// After a setting the EQ process is built from changed: restart it, unless it's the mic's and that's off.
@@ -276,8 +425,9 @@ impl Mixer {
         }
         let c = &mut self.state.channels[i];
         c.device_name = Some(device);
-        let (sink, name, mic) = (c.sink_name.clone(), c.name.clone(), c.mic);
-        let module = if mic { self.pw.load_virtual_source(&sink, &name) } else { self.pw.load_null_sink(&sink, &name) };
+        follow_output(c, self.headset_on);
+        let (sink, name, mic, spatial) = (c.sink_name.clone(), c.name.clone(), c.mic, c.spatial);
+        let module = if mic { self.pw.load_virtual_source(&sink, &name) } else { self.pw.load_null_sink(&sink, &name, spatial) };
         self.modules.insert(sink.clone(), module);
         let c = &self.state.channels[i];
         if mic {
@@ -324,6 +474,7 @@ impl Mixer {
             return bad(format!("Built-in channels can't be deleted: {}", self.state.channels[i].name));
         }
         let c = self.state.channels.remove(i);
+        self.meters.forget(&meter_source(&c));
         self.pw.stop_eq(&c.sink_name);
         if let Some(m) = self.modules.remove(&c.sink_name).filter(|&m| m >= 0) {
             self.pw.unload_module(m);
@@ -397,8 +548,10 @@ impl Mixer {
 
     /// Clear leftovers, seed presets, ensure the default channels and the mic, restore everything.
     fn bootstrap(&mut self) {
+        self.meters.stop_all(); // their parec dies with the old nodes
         self.pw.stop_all_eq();
         self.pw.unload_sonar_modules();
+        self.load_stream_sink(); // before the channels: their stream feeds play into it
         for (name, kind, bands) in presets() {
             match self.state.profiles.iter_mut().find(|p| p.name == name) {
                 Some(p) if p.built_in => { p.bands = bands; p.kind = kind.into(); }
@@ -440,7 +593,8 @@ impl Mixer {
         }
     }
 
-    fn shutdown(&self) {
+    fn shutdown(&mut self) {
+        self.meters.stop_all();
         self.pw.stop_all_eq();
         self.pw.unload_sonar_modules();
     }
@@ -457,7 +611,6 @@ impl Mixer {
             let dev = c.device_name.clone().unwrap_or_default();
             v["deviceDescription"] = json!(desc.get(&dev).unwrap_or(&dev));
             v["active"] = json!(live.contains(&c.sink_name));
-            v["eqOutput"] = json!(c.device_name);
             v["deletable"] = json!(Self::is_deletable(c));
             v
         }).collect())
@@ -491,9 +644,10 @@ impl Mixer {
             (Get, ["preferences"]) => Ok(json!(self.state.prefs)),
             (Get, ["eq"]) => Ok(json!({ "maxGain": MAX_GAIN, "profiles": self.state.profiles })),
             (Get, ["version"]) => Ok(json!({ "version": concat!(env!("CARGO_PKG_VERSION"), "-rs") })),
-            (Get, ["levels"]) => Ok(json!({})),
-            (Get, ["headset"]) => Ok(json!({})),
-            (Get, ["batteries"]) => Ok(json!([])),
+            (Get, ["levels"]) => {
+                let chans: Vec<(i64, String)> = self.state.channels.iter().map(|c| (c.id, meter_source(c))).collect();
+                Ok(json!(self.meters.levels(chans.into_iter())))
+            }
             (Get, ["hotkey"]) => Ok(json!({ "key": null })),
             (Get, ["auto-update"]) => Ok(json!({ "enabled": false })),
             (Put, ["preferences"]) => {
@@ -538,6 +692,7 @@ impl Mixer {
                     "device" => {
                         let dev = b["deviceName"].as_str().filter(|d| !d.trim().is_empty()).ok_or((400, "Missing field: deviceName".to_string()))?;
                         self.state.channels[i].device_name = Some(dev.into());
+                        follow_output(&mut self.state.channels[i], self.headset_on);
                         self.restart_eq(i);
                     }
                     "noise" => {
@@ -568,9 +723,19 @@ impl Mixer {
                         self.state.channels[i].preamp = check_preamp(num("preamp")?);
                         self.apply_gain(i);
                     }
-                    "stream-volume" | "stream-mute" | "spatial" => {
+                    "stream-volume" => {
                         self.output_idx(id)?;
-                        return Err((501, "Not in the Rust spike yet".into()));
+                        self.state.channels[i].stream_volume = int("volume")?.clamp(0, 100);
+                        self.apply_stream_gain(i);
+                    }
+                    "stream-mute" => {
+                        self.output_idx(id)?;
+                        self.state.channels[i].stream_muted = flag("muted")?;
+                        self.apply_stream_gain(i);
+                    }
+                    "spatial" => {
+                        self.output_idx(id)?;
+                        self.set_spatial(i, flag("enabled")?)?;
                     }
                     _ => return Err((404, "Not found".into())),
                 }
@@ -582,22 +747,9 @@ impl Mixer {
                 self.route(binary, b["displayName"].as_str().map(String::from), b["channelId"].as_i64())?;
                 ok
             }
-            (Post, ["chatmix"]) => {
-                self.state.prefs.chat_mix = int("mix")?.clamp(-100, 100);
-                self.save();
-                for i in 0..self.state.channels.len() {
-                    if ["sonar_game", "sonar_chat"].contains(&self.state.channels[i].sink_name.as_str()) { self.apply_gain(i); }
-                }
-                ok
-            }
-            (Post, ["master"]) => {
-                self.state.prefs.master_volume = int("volume")?.clamp(0, 100);
-                self.save();
-                for i in 0..self.state.channels.len() {
-                    if !self.state.channels[i].mic { self.apply_gain(i); }
-                }
-                ok
-            }
+            (Post, ["chatmix"]) => { self.set_chat_mix(int("mix")?); ok }
+            (Post, ["master"]) => { self.set_master_volume(int("volume")?); ok }
+            (Post, ["streamer"]) => { self.set_streamer_mode(flag("enabled")?); ok }
             (Post, ["eq", "profiles"]) => {
                 let name = check_name(b["name"].as_str())?;
                 let bands = check_bands(serde_json::from_value(b["bands"].clone()).map_err(|e| (400, e.to_string()))?)?;
@@ -634,7 +786,7 @@ impl Mixer {
                 self.save();
                 ok
             }
-            (Post, ["streamer"]) | (Post, ["mic", "test"]) | (Put, ["auto-update"]) | (Put, ["hotkey"]) =>
+            (Put, ["auto-update"]) | (Put, ["hotkey"]) =>
                 Err((501, "Not in the Rust spike yet".into())),
             _ => Err((404, "Not found".into())),
         }
@@ -661,56 +813,105 @@ fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k, v).unwrap()
 }
 
+type Resp = Response<std::io::Cursor<Vec<u8>>>;
+
+fn json_resp(result: Res<Value>) -> Resp {
+    match result {
+        Ok(Value::Null) => Response::from_data(vec![]),
+        Ok(v) => Response::from_data(serde_json::to_vec(&v).unwrap()).with_header(header("Content-Type", "application/json")),
+        Err((code, msg)) => Response::from_string(msg).with_status_code(code),
+    }
+}
+
+/// Mic test: a few seconds of the virtual mic (noise suppression, EQ, volume) as WAV. Records without the mixer lock.
+fn mic_test(mixer: &Mutex<Mixer>, seconds: u64) -> Resp {
+    let sink = {
+        let mut mx = mixer.lock().unwrap();
+        let Some(i) = mx.state.channels.iter().position(|c| c.mic) else {
+            return json_resp(bad("There's no mic channel"));
+        };
+        let sink = mx.state.channels[i].sink_name.clone();
+        mx.mic_last_used.insert(sink.clone(), Instant::now());
+        if !mx.pw.is_eq_running(&sink) {
+            mx.start_eq(i); // now, rather than on sync_mic's next tick: the recording would start silent
+        }
+        sink
+    };
+    match pw::record_wav(&sink, seconds) {
+        Ok(wav) => Response::from_data(wav).with_header(header("Content-Type", "audio/wav")),
+        Err(e) => Response::from_string(format!("Can't record {sink}: {e}")).with_status_code(500),
+    }
+}
+
+fn respond(req: Request, resp: Resp) {
+    let _ = req.respond(resp.with_header(header("Cache-Control", "no-store")));
+}
+
 fn main() {
     let static_dir = PathBuf::from(std::env::var("SONAR_STATIC").unwrap_or_else(|_| "../steelseriesGG/src/main/resources/static".into()));
     let addr = std::env::var("SONAR_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     std::fs::create_dir_all("data").expect("can't create data/");
     let file = PathBuf::from("data/state.json");
     let state = std::fs::read(&file).ok().map(|b| serde_json::from_slice(&b).expect("data/state.json is corrupt")).unwrap_or_default();
-    let mixer = Arc::new(Mutex::new(Mixer { pw: PipeWire::new(), state, file, modules: HashMap::new(), mic_last_used: HashMap::new(), missing_before: false }));
+    let mixer = Arc::new(Mutex::new(Mixer { pw: PipeWire::new(), state, file, modules: HashMap::new(), mic_last_used: HashMap::new(),
+        missing_before: false, meters: Meters::new(), headset_on: None, stream_module: -1 }));
     // listen first: another Sonar on the port means another one owns the sinks too
     let server = Server::http(&addr).expect("can't listen");
     mixer.lock().unwrap().bootstrap();
 
-    let m = mixer.clone();
+    let base = Arc::new(Base::default());
+    let (b, m) = (base.clone(), mixer.clone());
+    std::thread::spawn(move || b.run(m));
+
+    let (b, m) = (base.clone(), mixer.clone());
     ctrlc::set_handler(move || {
+        b.shutdown();
         // ponytail: waits for the lock, so a request mid-EQ-restart delays shutdown by up to ~2 s
         m.lock().unwrap().shutdown();
         std::process::exit(0);
     }).expect("can't install signal handler");
 
-    let m = mixer.clone();
+    let (b, m) = (base.clone(), mixer.clone());
     std::thread::spawn(move || {
         for tick in 0u64.. {
             std::thread::sleep(Duration::from_secs(1));
+            if tick % 3 == 0 { b.poll(); } // the reply also tells when the headset turned on or off
             let mut mx = m.lock().unwrap();
             mx.sync_mic();
             mx.enforce_routing();
+            mx.meters.stop_when_idle();
             if tick % 3 == 2 { mx.recover(); }
         }
     });
 
-    eprintln!("Sonar (Rust spike) on http://{addr}");
-    // ponytail: one request at a time, like the Java version's single mixer lock; a thread pool if the UI feels slow
+    eprintln!("Sonar (Rust) on http://{addr}");
+    // ponytail: one request at a time, like the Java version's single mixer lock; only the 5 s mic test gets a thread
     for mut req in server.incoming_requests() {
         let url = req.url().split('?').next().unwrap_or("/").to_string();
-        let resp = if url.starts_with("/api/") {
-            let mut body = Vec::new();
-            let _ = req.as_reader().read_to_end(&mut body);
-            let result = mixer.lock().unwrap().handle(req.method(), &url, &body);
-            match result {
-                Ok(Value::Null) => Response::from_data(vec![]),
-                Ok(v) => Response::from_data(serde_json::to_vec(&v).unwrap()).with_header(header("Content-Type", "application/json")),
-                Err((code, msg)) => Response::from_string(msg).with_status_code(code),
+        let resp = match (req.method(), url.as_str()) {
+            // outside the mixer lock: the base station's reader takes it while the refresh waits for a reply
+            (Method::Get, "/api/headset") => json_resp(Ok(json!(base.refresh()))),
+            (Method::Get, "/api/batteries") => json_resp(Ok(json!(base::batteries()))),
+            (Method::Post, "/api/mic/test") => {
+                let m = mixer.clone();
+                std::thread::spawn(move || { let r = mic_test(&m, 5); respond(req, r); });
+                continue;
             }
-        } else {
-            let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
-            match (!rel.contains("..")).then(|| std::fs::read(static_dir.join(rel))).and_then(Result::ok) {
-                Some(data) => Response::from_data(data).with_header(header("Content-Type", content_type(rel))),
-                None => Response::from_string("Not found").with_status_code(404),
+            (_, u) if u.starts_with("/api/") => {
+                let mut body = Vec::new();
+                let _ = req.as_reader().read_to_end(&mut body);
+                let result = mixer.lock().unwrap().handle(req.method(), &url, &body);
+                json_resp(result)
+            }
+            _ => {
+                let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
+                match (!rel.contains("..")).then(|| std::fs::read(static_dir.join(rel))).and_then(Result::ok) {
+                    Some(data) => Response::from_data(data).with_header(header("Content-Type", content_type(rel))),
+                    None => Response::from_string("Not found").with_status_code(404),
+                }
             }
         };
-        let _ = req.respond(resp.with_header(header("Cache-Control", "no-store")));
+        respond(req, resp);
     }
 }
 
@@ -731,5 +932,23 @@ mod tests {
         // the Java API's JSON loads as state
         let c: Channel = serde_json::from_str(r#"{"id":3,"name":"Media","sinkName":"sonar_media","active":true,"eq":[{"type":"lowshelf","freq":120.0,"gain":6.0,"q":0.71}]}"#).unwrap();
         assert_eq!((c.id, c.volume, c.eq.len()), (3, 100, 1));
+    }
+
+    #[test]
+    fn eq_follows_the_output() {
+        let dev = "alsa_output.usb-SteelSeries_Arctis_Nova_Pro_Wireless-00.analog-stereo";
+        let mut c = Channel { device_name: Some(dev.into()), ..Default::default() };
+        assert!(!follow_output(&mut c, None)); // headset state unknown: nothing to do
+        assert!(!follow_output(&mut c, Some(true))); // first visit keeps the current EQ
+        c.eq = vec![EqBand::new("peaking", 100.0, 3.0, 1.0)];
+        assert!(!follow_output(&mut c, Some(false))); // speakers, first visit: keeps it too
+        c.eq = vec![];
+        assert!(follow_output(&mut c, Some(true))); // back on the headset: its EQ returns
+        assert_eq!(c.eq.len(), 1);
+        assert_eq!(c.eq_output.as_deref(), Some(dev));
+        assert!(follow_output(&mut c, Some(false)));
+        assert!(c.eq.is_empty());
+        let mic = Channel { mic: true, device_name: Some(dev.into()), ..Default::default() };
+        assert_eq!(output_key(&mic, None).as_deref(), Some(dev));
     }
 }
