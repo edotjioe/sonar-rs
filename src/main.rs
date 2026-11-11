@@ -638,7 +638,7 @@ impl Mixer {
             (Get, ["apps"]) => Ok(self.apps_view()),
             (Get, ["preferences"]) => Ok(json!(self.state.prefs)),
             (Get, ["eq"]) => Ok(json!({ "maxGain": MAX_GAIN, "profiles": self.state.profiles })),
-            (Get, ["version"]) => Ok(json!({ "version": concat!(env!("CARGO_PKG_VERSION"), "-rs") })),
+            (Get, ["version"]) => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
             (Get, ["levels"]) => {
                 let chans: Vec<(i64, String)> = self.state.channels.iter().map(|c| (c.id, meter_source(c))).collect();
                 Ok(json!(self.meters.levels(chans.into_iter())))
